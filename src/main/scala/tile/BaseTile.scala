@@ -11,6 +11,7 @@ import freechips.rocketchip.interrupts._
 import freechips.rocketchip.rocket._
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.util._
+import freechips.rocketchip.diplomaticobjectmodel.logicaltree.RocketLogicalTreeNode
 
 case object TileVisibilityNodeKey extends Field[TLEphemeralNode]
 case object TileKey extends Field[TileParams]
@@ -233,6 +234,8 @@ abstract class BaseTile private (val crossing: ClockCrossingType, q: Parameters)
 
   def crossIntIn(): IntInwardNode = crossIntIn(intInwardNode)
   def crossIntOut(): IntOutwardNode = crossIntOut(intOutwardNode)
+
+  def rocketLogicalTree: RocketLogicalTreeNode
 
   this.suggestName(tileParams.name)
 }

@@ -14,24 +14,7 @@ import freechips.rocketchip.rocket._
 import freechips.rocketchip.subsystem.RocketCrossingParams
 import freechips.rocketchip.util._
 
-case class RocketTileParams(
-    core: RocketCoreParams = RocketCoreParams(),
-    icache: Option[ICacheParams] = Some(ICacheParams()),
-    dcache: Option[DCacheParams] = Some(DCacheParams()),
-    btb: Option[BTBParams] = Some(BTBParams()),
-    dataScratchpadBytes: Int = 0,
-    name: Option[String] = Some("tile"),
-    hartId: Int = 0,
-    beuAddr: Option[BigInt] = None,
-    blockerCtrlAddr: Option[BigInt] = None,
-    boundaryBuffers: Boolean = false, // if synthesized with hierarchical PnR, cut feed-throughs?
-    fpga: Boolean = false
-    ) extends TileParams {
-  require(icache.isDefined)
-  require(dcache.isDefined)
-}
-
-class RocketTile private(
+class FPGATile private(
       val rocketParams: RocketTileParams,
       crossing: ClockCrossingType,
       lookup: LookupByHartIdImpl,
@@ -96,7 +79,7 @@ class RocketTile private(
     Resource(cpuDevice, "reg").bind(ResourceAddress(hartId))
   }
 
-  override lazy val module = new RocketTileModuleImp(this)
+  override lazy val module = new FPGATileModuleImp(this)
 
   override def makeMasterBoundaryBuffers(implicit p: Parameters) = {
     if (!rocketParams.boundaryBuffers) super.makeMasterBoundaryBuffers
@@ -114,14 +97,14 @@ class RocketTile private(
   LogicalModuleTree.add(rocketLogicalTree, dCacheLogicalTreeNode)
 }
 
-class RocketTileModuleImp(outer: RocketTile) extends BaseTileModuleImp(outer)
+class FPGATileModuleImp(outer: FPGATile) extends BaseTileModuleImp(outer)
     with HasCore
     with HasFpuOpt
     with HasLazyRoCCModule
     with HasICacheFrontendModule {
   Annotated.params(this, outer.rocketParams)
 
-  val core = Module(new Rocket(outer)(outer.p))
+  val core = Module(new FPGARocket(outer)(outer.p))
 
   // Report unrecoverable error conditions; for now the only cause is cache ECC errors
   outer.reportHalt(List(outer.frontend.module.io.errors, outer.dcache.module.io.errors))
@@ -178,12 +161,4 @@ class RocketTileModuleImp(outer: RocketTile) extends BaseTileModuleImp(outer)
   // TODO figure out how to move the below into their respective mix-ins
   dcacheArb.io.requestor <> dcachePorts
   ptw.io.requestor <> ptwPorts
-}
-
-trait HasCore { this: BaseTileModuleImp[_] =>
-  def core: CoreModule with HasCoreMonitorBundle
-}
-
-trait HasFpuOpt { this: BaseTileModuleImp[_ <: HasNonDiplomaticTileParameters] =>
-  val fpuOpt = outer.tileParams.core.fpu.map(params => Module(new FPU(params)(outer.p)))
 }

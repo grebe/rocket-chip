@@ -82,7 +82,7 @@ trait HasLazyRoCC extends CanHavePTW { this: BaseTile =>
 }
 
 trait HasLazyRoCCModule extends CanHavePTWModule
-    with HasCoreParameters { this: RocketTileModuleImp with HasFpuOpt =>
+    with HasCoreParameters { this: BaseTileModuleImp[_ <: HasLazyRoCC] with HasFpuOpt =>
 
   val (respArb, cmdRouter) = if(outer.roccs.size > 0) {
     val respArb = Module(new RRArbiter(new RoCCResponse()(outer.p), outer.roccs.size))

@@ -14,89 +14,8 @@ import freechips.rocketchip.scie._
 import scala.collection.immutable.ListMap
 import scala.collection.mutable.ArrayBuffer
 
-case class RocketCoreParams(
-  bootFreqHz: BigInt = 0,
-  useVM: Boolean = true,
-  useUser: Boolean = false,
-  useDebug: Boolean = true,
-  useAtomics: Boolean = true,
-  useAtomicsOnlyForIO: Boolean = false,
-  useCompressed: Boolean = true,
-  useSCIE: Boolean = false,
-  nLocalInterrupts: Int = 0,
-  nBreakpoints: Int = 1,
-  useBPWatch: Boolean = false,
-  nPMPs: Int = 8,
-  nPerfCounters: Int = 0,
-  haveBasicCounters: Boolean = true,
-  haveCFlush: Boolean = false,
-  misaWritable: Boolean = true,
-  nL2TLBEntries: Int = 0,
-  mtvecInit: Option[BigInt] = Some(BigInt(0)),
-  mtvecWritable: Boolean = true,
-  fastLoadWord: Boolean = true,
-  fastLoadByte: Boolean = false,
-  branchPredictionModeCSR: Boolean = false,
-  clockGate: Boolean = false,
-  mvendorid: Int = 0, // 0 means non-commercial implementation
-  mimpid: Int = 0x20181004, // release date in BCD
-  mulDiv: Option[MulDivParams] = Some(MulDivParams()),
-  fpu: Option[FPUParams] = Some(FPUParams())
-) extends CoreParams {
-  val lgPauseCycles = 5
-  val haveFSDirty = false
-  val useRVE = false
-  val pmpGranularity: Int = 4
-  val fetchWidth: Int = if (useCompressed) 2 else 1
-  //  fetchWidth doubled, but coreInstBytes halved, for RVC:
-  val decodeWidth: Int = fetchWidth / (if (useCompressed) 2 else 1)
-  val retireWidth: Int = 1
-  val instBits: Int = if (useCompressed) 16 else 32
-  val lrscCycles: Int = 80 // worst case is 14 mispredicted branches + slop
-  override def customCSRs(implicit p: Parameters) = new RocketCustomCSRs
-}
-
-trait HasCoreMonitorBundle {
-  def coreMonitorBundle: CoreMonitorBundle
-}
-
-trait HasRocketCoreParameters extends HasCoreParameters {
-  lazy val rocketParams: RocketCoreParams = tileParams.core.asInstanceOf[RocketCoreParams]
-
-  val fastLoadWord = rocketParams.fastLoadWord
-  val fastLoadByte = rocketParams.fastLoadByte
-
-  val mulDivParams = rocketParams.mulDiv.getOrElse(MulDivParams()) // TODO ask andrew about this
-
-  require(!fastLoadByte || fastLoadWord)
-}
-
-class RocketCustomCSRs(implicit p: Parameters) extends CustomCSRs with HasRocketCoreParameters {
-  override def bpmCSR = {
-    rocketParams.branchPredictionModeCSR.option(CustomCSR(bpmCSRId, BigInt(1), Some(BigInt(0))))
-  }
-
-  override def chickenCSR = {
-    val mask = BigInt(
-      tileParams.dcache.get.clockGate.toInt << 0 |
-      rocketParams.clockGate.toInt << 1 |
-      rocketParams.clockGate.toInt << 2
-    )
-    Some(CustomCSR(chickenCSRId, mask, Some(mask)))
-  }
-
-  def marchid = CustomCSR.constant(CSRs.marchid, BigInt(1))
-
-  def mvendorid = CustomCSR.constant(CSRs.mvendorid, BigInt(rocketParams.mvendorid))
-
-  // mimpid encodes a release version in the form of a BCD-encoded datestamp.
-  def mimpid = CustomCSR.constant(CSRs.mimpid, BigInt(rocketParams.mimpid))
-
-  override def decls = super.decls :+ marchid :+ mvendorid :+ mimpid
-}
-
 @chiselName
-class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
+class FPGARocket(tile: FPGATile)(implicit p: Parameters) extends CoreModule()(p)
     with HasRocketCoreParameters
     with HasCoreMonitorBundle
     with HasCoreIO {
@@ -197,7 +116,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val ex_reg_raw_inst = Reg(UInt())
   val ex_scie_unpipelined = Reg(Bool())
   val ex_scie_pipelined = Reg(Bool())
-  val ex_reg_wphit            = Reg(Vec(nBreakpoints, Bool()))
+  val ex_reg_bpwatch          = Reg(Vec(nBreakpoints, new BPWatch))
 
   val mem_reg_xcpt_interrupt  = Reg(Bool())
   val mem_reg_valid           = Reg(Bool())
@@ -221,7 +140,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val mem_reg_rs2 = Reg(Bits())
   val mem_br_taken = Reg(Bool())
   val take_pc_mem = Wire(Bool())
-  val mem_reg_wphit          = Reg(Vec(nBreakpoints, Bool()))
+  val mem_reg_bpwatch        = Reg(Vec(nBreakpoints, new BPWatch))
 
   val wb_reg_valid           = Reg(Bool())
   val wb_reg_xcpt            = Reg(Bool())
@@ -236,7 +155,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val wb_reg_wdata = Reg(Bits())
   val wb_reg_rs2 = Reg(Bits())
   val take_pc_wb = Wire(Bool())
-  val wb_reg_wphit           = Reg(Vec(nBreakpoints, Bool()))
+  val wb_reg_bpwatch         = Reg(Vec(nBreakpoints, new BPWatch))
 
   val take_pc_mem_wb = take_pc_wb || take_pc_mem
   val take_pc = take_pc_mem_wb
@@ -259,7 +178,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val id_reg_fence = Reg(init=Bool(false))
   val id_ren = IndexedSeq(id_ctrl.rxs1, id_ctrl.rxs2)
   val id_raddr = IndexedSeq(id_raddr1, id_raddr2)
-  val rf = new RegFile(31, xLen)
+  val rf = new SeqRegFile(31, xLen)
   val id_rs = id_raddr.map(rf.read _)
   val ctrl_killd = Wire(Bool())
   val id_npc = (ibuf.io.pc.asSInt + ImmGen(IMM_UJ, id_inst(0))).asUInt
@@ -339,7 +258,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val ex_waddr = ex_reg_inst(11,7)
   val mem_waddr = mem_reg_inst(11,7)
   val wb_waddr = wb_reg_inst(11,7)
-  val bypass_sources = IndexedSeq(
+  val bypass_sources = IndexedSeq[(Bool, UInt, UInt)](
     (Bool(true), UInt(0), UInt(0)), // treat reading x0 as a bypass
     (ex_reg_valid && ex_ctrl.wxd, ex_waddr, mem_reg_wdata),
     (mem_reg_valid && mem_ctrl.wxd && !mem_ctrl.mem, mem_waddr, wb_reg_wdata),
@@ -351,8 +270,10 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val ex_reg_rs_bypass = Reg(Vec(id_raddr.size, Bool()))
   val ex_reg_rs_lsb = Reg(Vec(id_raddr.size, UInt(width = log2Ceil(bypass_sources.size))))
   val ex_reg_rs_msb = Reg(Vec(id_raddr.size, UInt()))
+  val ex_use_rs_lsb = Wire(Vec(id_raddr.size, UInt(width = log2Ceil(bypass_sources.size))))
+  val ex_use_rs_msb = Wire(Vec(id_raddr.size, UInt()))
   val ex_rs = for (i <- 0 until id_raddr.size)
-    yield Mux(ex_reg_rs_bypass(i), bypass_mux(ex_reg_rs_lsb(i)), Cat(ex_reg_rs_msb(i), ex_reg_rs_lsb(i)))
+    yield Mux(ex_reg_rs_bypass(i), bypass_mux(ex_use_rs_lsb(i)), Cat(ex_use_rs_msb(i), ex_use_rs_lsb(i)))
   val ex_imm = ImmGen(ex_ctrl.sel_imm, ex_reg_inst)
   val ex_op1 = MuxLookup(ex_ctrl.sel_alu1, SInt(0), Seq(
     A1_RS1 -> ex_rs(0).asSInt,
@@ -435,14 +356,27 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
       ex_reg_mem_size := Cat(id_raddr2 =/= UInt(0), id_raddr1 =/= UInt(0))
     }
 
+
     for (i <- 0 until id_raddr.size) {
+      val ex_use_rf = RegInit(false.B)
       val do_bypass = id_bypass_src(i).reduce(_||_)
       val bypass_src = PriorityEncoder(id_bypass_src(i))
-      ex_reg_rs_bypass(i) := do_bypass
+      ex_use_rs_lsb(i) := Mux(ex_use_rf, id_rs(i)(log2Ceil(bypass_sources.size)-1, 0), ex_reg_rs_lsb(i))
+      ex_use_rs_msb(i) := Mux(ex_use_rf, id_rs(i) >> log2Ceil(bypass_sources.size), ex_reg_rs_msb(i))
+      ex_reg_rs_lsb(i) := ex_use_rs_lsb(i)
+      ex_reg_rs_msb(i) := ex_use_rs_msb(i)
+      ex_reg_rs_bypass(i) := false.B // do_bypass
       ex_reg_rs_lsb(i) := bypass_src
-      when (id_ren(i) && !do_bypass) {
-        ex_reg_rs_lsb(i) := id_rs(i)(log2Ceil(bypass_sources.size)-1, 0)
-        ex_reg_rs_msb(i) := id_rs(i) >> log2Ceil(bypass_sources.size)
+      ex_use_rf := false.B
+      when (id_ren(i)) { //  && !do_bypass) {
+        ex_use_rf := true.B
+        // ex_reg_rs_lsb(i) := id_rs(i)(log2Ceil(bypass_sources.size)-1, 0)
+        // ex_reg_rs_msb(i) := id_rs(i) >> log2Ceil(bypass_sources.size)
+      }
+      if (i == 0) {
+        when (id_illegal_insn) {
+          ex_use_rf := false.B
+        }
       }
     }
     when (id_illegal_insn) {
@@ -458,7 +392,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     ex_reg_raw_inst := id_raw_inst(0)
     ex_reg_pc := ibuf.io.pc
     ex_reg_btb_resp := ibuf.io.btb_resp
-    ex_reg_wphit := bpu.io.bpwatch.map { bpw => bpw.ivalid(0) }
+    ex_reg_bpwatch := bpu.io.bpwatch
   }
 
   // replay inst in ex stage?
@@ -517,7 +451,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     mem_reg_btb_resp := ex_reg_btb_resp
     mem_reg_flush_pipe := ex_reg_flush_pipe
     mem_reg_slow_bypass := ex_slow_bypass
-    mem_reg_wphit := ex_reg_wphit
+    mem_reg_bpwatch := ex_reg_bpwatch
 
     mem_reg_cause := ex_cause
     mem_reg_inst := ex_reg_inst
@@ -581,8 +515,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     wb_reg_raw_inst := mem_reg_raw_inst
     wb_reg_mem_size := mem_reg_mem_size
     wb_reg_pc := mem_reg_pc
-    wb_reg_wphit := mem_reg_wphit | bpu.io.bpwatch.map { bpw => bpw.dvalid(0) }
-
+    wb_reg_bpwatch := mem_reg_bpwatch
   }
 
   val (wb_xcpt, wb_cause) = checkExceptions(List(
@@ -679,10 +612,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   csr.io.rw.cmd := CSR.maskCmd(wb_reg_valid, wb_ctrl.csr)
   csr.io.rw.wdata := wb_reg_wdata
   io.trace := csr.io.trace
-  for (((iobpw, wphit), bp) <- io.bpwatch zip wb_reg_wphit zip csr.io.bp) {
-    iobpw.valid(0) := wphit
-    iobpw.action := bp.control.action
-  }
+  io.bpwatch := wb_reg_bpwatch
 
   val hazard_targets = Seq((id_ctrl.rxs1 && id_raddr1 =/= UInt(0), id_raddr1),
                            (id_ctrl.rxs2 && id_raddr2 =/= UInt(0), id_raddr2),
@@ -950,43 +880,31 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   }
 }
 
-class RegFile(n: Int, w: Int, zero: Boolean = false) {
-  val rf = Mem(n, UInt(width = w))
+class SeqRegFile(n: Int, w: Int, zero: Boolean = false) {
+  val rf = SeqMem(n, UInt(width = w))
+  rf.suggestName("regfile")
+
   private def access(addr: UInt) = rf(~addr(log2Up(n)-1,0))
   private val reads = ArrayBuffer[(UInt,UInt)]()
   private var canRead = true
   def read(addr: UInt) = {
     require(canRead)
-    reads += addr -> Wire(UInt())
-    reads.last._2 := Mux(Bool(zero) && addr === UInt(0), UInt(0), access(addr))
-    reads.last._2
+    val rdata = Wire(UInt())
+    reads += addr -> rdata
+    rdata := rf.read(~addr(log2Up(n)-1, 0))
+      // Mux(Bool(zero) && addr === UInt(0), UInt(0), rf.read(addr))
+    when (addr === UInt(0)) {
+      rdata := UInt(0)
+    }
+    rdata
   }
   def write(addr: UInt, data: UInt) = {
     canRead = false
     when (addr =/= UInt(0)) {
-      access(addr) := data
+      rf.write(~addr(log2Up(n)-1, 0), data)
       for ((raddr, rdata) <- reads)
         when (addr === raddr) { rdata := data }
     }
   }
 }
 
-object ImmGen {
-  def apply(sel: UInt, inst: UInt) = {
-    val sign = Mux(sel === IMM_Z, SInt(0), inst(31).asSInt)
-    val b30_20 = Mux(sel === IMM_U, inst(30,20).asSInt, sign)
-    val b19_12 = Mux(sel =/= IMM_U && sel =/= IMM_UJ, sign, inst(19,12).asSInt)
-    val b11 = Mux(sel === IMM_U || sel === IMM_Z, SInt(0),
-              Mux(sel === IMM_UJ, inst(20).asSInt,
-              Mux(sel === IMM_SB, inst(7).asSInt, sign)))
-    val b10_5 = Mux(sel === IMM_U || sel === IMM_Z, Bits(0), inst(30,25))
-    val b4_1 = Mux(sel === IMM_U, Bits(0),
-               Mux(sel === IMM_S || sel === IMM_SB, inst(11,8),
-               Mux(sel === IMM_Z, inst(19,16), inst(24,21))))
-    val b0 = Mux(sel === IMM_S, inst(7),
-             Mux(sel === IMM_I, inst(20),
-             Mux(sel === IMM_Z, inst(15), Bits(0))))
-
-    Cat(sign, b30_20, b19_12, b11, b10_5, b4_1, b0).asSInt
-  }
-}

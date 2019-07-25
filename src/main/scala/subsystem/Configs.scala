@@ -136,6 +136,38 @@ class With1TinyCore extends Config((site, here, up) => {
   ))
 })
 
+class WithFPGACores extends Config((site, here, up) => {
+  case RocketTilesKey => up(RocketTilesKey, site).map(_.copy(
+      core = RocketCoreParams(
+        useVM = false,
+        useAtomics = false,
+        useCompressed = true,
+        useUser = false,
+        fpu = None,
+        mulDiv = Some(MulDivParams(mulUnroll = 8))),
+      btb = None,
+      // dcache = Some(DCacheParams(
+      //   rowBits = site(SystemBusKey).beatBits,
+      //   nSets = 288, // 16Kb scratchpad
+      //   nWays = 1,
+      //   nTLBEntries = 4,
+      //   nMSHRs = 0,
+      //   blockBytes = site(CacheBlockBytes),
+      //   // scratch = Some(0x80000000L))),
+      // icache = Some(ICacheParams(
+      //   rowBits = site(SystemBusKey).beatBits,
+      //   nSets = 64,
+      //   nWays = 1,
+      //   nTLBEntries = 4,
+      //   blockBytes = site(CacheBlockBytes))),
+      fpga = true
+    ))
+  case RocketCrossingKey => List(RocketCrossingParams(
+    crossingType = SynchronousCrossing(),
+    master = TileMasterPortParams()
+  ))
+})
+
 class WithNBanks(n: Int) extends Config((site, here, up) => {
   case BankedL2Key => up(BankedL2Key, site).copy(nBanks = n)
 })

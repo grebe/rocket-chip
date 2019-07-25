@@ -39,7 +39,11 @@ trait HasRocketTiles extends HasTiles
   // Note that we also inject new nodes into the tile itself,
   // also based on the crossing type.
   val rocketTiles = rocketTileParams.zip(crossings).map { case (tp, crossing) =>
-    val rocket = LazyModule(new RocketTile(tp, crossing, PriorityMuxHartIdFromSeq(rocketTileParams), logicalTreeNode))
+    val rocket = if (!tp.fpga) {
+      LazyModule(new RocketTile(tp, crossing, PriorityMuxHartIdFromSeq(rocketTileParams), logicalTreeNode))
+    } else {
+      LazyModule(new FPGATile(tp, crossing, PriorityMuxHartIdFromSeq(rocketTileParams), logicalTreeNode))
+    }
 
     connectMasterPortsToSBus(rocket, crossing)
     connectSlavePortsToCBus(rocket, crossing)
@@ -55,7 +59,7 @@ trait HasRocketTiles extends HasTiles
   }
 
   def coreMonitorBundles = (rocketTiles map { t =>
-    t.module.core.rocketImpl.coreMonitorBundle
+    t.module.core.coreMonitorBundle
   }).toList
 }
 

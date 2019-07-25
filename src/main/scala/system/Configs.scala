@@ -29,6 +29,7 @@ class DefaultBufferlessConfig extends Config(
 
 class DefaultSmallConfig extends Config(new WithNSmallCores(1) ++ new BaseConfig)
 class DefaultRV32Config extends Config(new WithRV32 ++ new DefaultConfig)
+class DefaultRV32FPGAConfig extends Config(new WithFPGACores ++ new DefaultRV32Config)
 
 class DualBankConfig extends Config(
   new WithNBanks(2) ++ new BaseConfig)
