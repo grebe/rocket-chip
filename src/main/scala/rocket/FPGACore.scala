@@ -116,7 +116,7 @@ class FPGARocket(tile: FPGATile)(implicit p: Parameters) extends CoreModule()(p)
   val ex_reg_raw_inst = Reg(UInt())
   val ex_scie_unpipelined = Reg(Bool())
   val ex_scie_pipelined = Reg(Bool())
-  val ex_reg_bpwatch          = Reg(Vec(nBreakpoints, new BPWatch))
+  val ex_reg_wphit            = Reg(Vec(nBreakpoints, Bool()))
 
   val mem_reg_xcpt_interrupt  = Reg(Bool())
   val mem_reg_valid           = Reg(Bool())
@@ -140,7 +140,7 @@ class FPGARocket(tile: FPGATile)(implicit p: Parameters) extends CoreModule()(p)
   val mem_reg_rs2 = Reg(Bits())
   val mem_br_taken = Reg(Bool())
   val take_pc_mem = Wire(Bool())
-  val mem_reg_bpwatch        = Reg(Vec(nBreakpoints, new BPWatch))
+  val mem_reg_wphit          = Reg(Vec(nBreakpoints, Bool()))
 
   val wb_reg_valid           = Reg(Bool())
   val wb_reg_xcpt            = Reg(Bool())
@@ -155,7 +155,7 @@ class FPGARocket(tile: FPGATile)(implicit p: Parameters) extends CoreModule()(p)
   val wb_reg_wdata = Reg(Bits())
   val wb_reg_rs2 = Reg(Bits())
   val take_pc_wb = Wire(Bool())
-  val wb_reg_bpwatch         = Reg(Vec(nBreakpoints, new BPWatch))
+  val wb_reg_wphit           = Reg(Vec(nBreakpoints, Bool()))
 
   val take_pc_mem_wb = take_pc_wb || take_pc_mem
   val take_pc = take_pc_mem_wb
@@ -258,7 +258,7 @@ class FPGARocket(tile: FPGATile)(implicit p: Parameters) extends CoreModule()(p)
   val ex_waddr = ex_reg_inst(11,7)
   val mem_waddr = mem_reg_inst(11,7)
   val wb_waddr = wb_reg_inst(11,7)
-  val bypass_sources = IndexedSeq[(Bool, UInt, UInt)](
+  val bypass_sources = IndexedSeq(
     (Bool(true), UInt(0), UInt(0)), // treat reading x0 as a bypass
     (ex_reg_valid && ex_ctrl.wxd, ex_waddr, mem_reg_wdata),
     (mem_reg_valid && mem_ctrl.wxd && !mem_ctrl.mem, mem_waddr, wb_reg_wdata),
@@ -326,6 +326,39 @@ class FPGARocket(tile: FPGATile)(implicit p: Parameters) extends CoreModule()(p)
   ex_reg_xcpt := !ctrl_killd && id_xcpt
   ex_reg_xcpt_interrupt := !take_pc && ibuf.io.inst(0).valid && csr.io.interrupt
 
+  val ex_check_funcp = id_ctrl.wxd && id_waddr === 0.U && (id_raddr(0) === id_raddr(1)) && id_ctrl.rxs1 && id_ctrl.rxs2
+
+  when (ex_check_funcp) {
+    printf("Oh hai mark!")
+  }
+
+  for (i <- 0 until id_raddr.size) {
+    val ex_use_rf = RegInit(true.B)
+    val do_bypass = id_bypass_src(i).reduce(_||_)
+    val bypass_src = PriorityEncoder(id_bypass_src(i))
+    ex_use_rs_lsb(i) := Mux(ex_use_rf, id_rs(i)(log2Ceil(bypass_sources.size)-1, 0), ex_reg_rs_lsb(i))
+    ex_use_rs_msb(i) := Mux(ex_use_rf, id_rs(i) >> log2Ceil(bypass_sources.size), ex_reg_rs_msb(i))
+    ex_reg_rs_lsb(i) := ex_use_rs_lsb(i)
+    ex_reg_rs_msb(i) := ex_use_rs_msb(i)
+    ex_use_rf := false.B
+    when (!ctrl_killd) {
+      ex_reg_rs_bypass(i) := do_bypass
+      ex_reg_rs_lsb(i) := bypass_src
+      when (id_ren(i) && !do_bypass) {
+        ex_use_rf := true.B
+      }
+      if (i == 0) {
+        when (id_illegal_insn) {
+          val inst = Mux(ibuf.io.inst(0).bits.rvc, id_raw_inst(0)(15, 0), id_raw_inst(0))
+          ex_use_rf := false.B
+          ex_reg_rs_bypass(0) := false.B
+          ex_reg_rs_lsb(0) := inst(log2Ceil(bypass_sources.size)-1, 0)
+          ex_reg_rs_msb(0) := inst >> log2Ceil(bypass_sources.size)
+        }
+      }
+    }
+  }
+
   when (!ctrl_killd) {
     ex_ctrl := id_ctrl
     ex_reg_rvc := ibuf.io.inst(0).bits.rvc
@@ -355,36 +388,6 @@ class FPGARocket(tile: FPGATile)(implicit p: Parameters) extends CoreModule()(p)
     when (id_ctrl.mem_cmd.isOneOf(M_SFENCE, M_FLUSH_ALL)) {
       ex_reg_mem_size := Cat(id_raddr2 =/= UInt(0), id_raddr1 =/= UInt(0))
     }
-
-
-    for (i <- 0 until id_raddr.size) {
-      val ex_use_rf = RegInit(false.B)
-      val do_bypass = id_bypass_src(i).reduce(_||_)
-      val bypass_src = PriorityEncoder(id_bypass_src(i))
-      ex_use_rs_lsb(i) := Mux(ex_use_rf, id_rs(i)(log2Ceil(bypass_sources.size)-1, 0), ex_reg_rs_lsb(i))
-      ex_use_rs_msb(i) := Mux(ex_use_rf, id_rs(i) >> log2Ceil(bypass_sources.size), ex_reg_rs_msb(i))
-      ex_reg_rs_lsb(i) := ex_use_rs_lsb(i)
-      ex_reg_rs_msb(i) := ex_use_rs_msb(i)
-      ex_reg_rs_bypass(i) := false.B // do_bypass
-      ex_reg_rs_lsb(i) := bypass_src
-      ex_use_rf := false.B
-      when (id_ren(i)) { //  && !do_bypass) {
-        ex_use_rf := true.B
-        // ex_reg_rs_lsb(i) := id_rs(i)(log2Ceil(bypass_sources.size)-1, 0)
-        // ex_reg_rs_msb(i) := id_rs(i) >> log2Ceil(bypass_sources.size)
-      }
-      if (i == 0) {
-        when (id_illegal_insn) {
-          ex_use_rf := false.B
-        }
-      }
-    }
-    when (id_illegal_insn) {
-      val inst = Mux(ibuf.io.inst(0).bits.rvc, id_raw_inst(0)(15, 0), id_raw_inst(0))
-      ex_reg_rs_bypass(0) := false
-      ex_reg_rs_lsb(0) := inst(log2Ceil(bypass_sources.size)-1, 0)
-      ex_reg_rs_msb(0) := inst >> log2Ceil(bypass_sources.size)
-    }
   }
   when (!ctrl_killd || csr.io.interrupt || ibuf.io.inst(0).bits.replay) {
     ex_reg_cause := id_cause
@@ -392,7 +395,7 @@ class FPGARocket(tile: FPGATile)(implicit p: Parameters) extends CoreModule()(p)
     ex_reg_raw_inst := id_raw_inst(0)
     ex_reg_pc := ibuf.io.pc
     ex_reg_btb_resp := ibuf.io.btb_resp
-    ex_reg_bpwatch := bpu.io.bpwatch
+    ex_reg_wphit := bpu.io.bpwatch.map { bpw => bpw.ivalid(0) }
   }
 
   // replay inst in ex stage?
@@ -451,7 +454,7 @@ class FPGARocket(tile: FPGATile)(implicit p: Parameters) extends CoreModule()(p)
     mem_reg_btb_resp := ex_reg_btb_resp
     mem_reg_flush_pipe := ex_reg_flush_pipe
     mem_reg_slow_bypass := ex_slow_bypass
-    mem_reg_bpwatch := ex_reg_bpwatch
+    mem_reg_wphit := ex_reg_wphit
 
     mem_reg_cause := ex_cause
     mem_reg_inst := ex_reg_inst
@@ -515,7 +518,8 @@ class FPGARocket(tile: FPGATile)(implicit p: Parameters) extends CoreModule()(p)
     wb_reg_raw_inst := mem_reg_raw_inst
     wb_reg_mem_size := mem_reg_mem_size
     wb_reg_pc := mem_reg_pc
-    wb_reg_bpwatch := mem_reg_bpwatch
+    wb_reg_wphit := mem_reg_wphit | bpu.io.bpwatch.map { bpw => bpw.dvalid(0) }
+
   }
 
   val (wb_xcpt, wb_cause) = checkExceptions(List(
@@ -612,7 +616,10 @@ class FPGARocket(tile: FPGATile)(implicit p: Parameters) extends CoreModule()(p)
   csr.io.rw.cmd := CSR.maskCmd(wb_reg_valid, wb_ctrl.csr)
   csr.io.rw.wdata := wb_reg_wdata
   io.trace := csr.io.trace
-  io.bpwatch := wb_reg_bpwatch
+  for (((iobpw, wphit), bp) <- io.bpwatch zip wb_reg_wphit zip csr.io.bp) {
+    iobpw.valid(0) := wphit
+    iobpw.action := bp.control.action
+  }
 
   val hazard_targets = Seq((id_ctrl.rxs1 && id_raddr1 =/= UInt(0), id_raddr1),
                            (id_ctrl.rxs2 && id_raddr2 =/= UInt(0), id_raddr2),
@@ -881,7 +888,7 @@ class FPGARocket(tile: FPGATile)(implicit p: Parameters) extends CoreModule()(p)
 }
 
 class SeqRegFile(n: Int, w: Int, zero: Boolean = false) {
-  val rf = SeqMem(n, UInt(width = w))
+  val rf = SeqMem(n + 1, UInt(width = w))
   rf.suggestName("regfile")
 
   private def access(addr: UInt) = rf(~addr(log2Up(n)-1,0))
@@ -891,9 +898,10 @@ class SeqRegFile(n: Int, w: Int, zero: Boolean = false) {
     require(canRead)
     val rdata = Wire(UInt())
     reads += addr -> rdata
-    rdata := rf.read(~addr(log2Up(n)-1, 0))
+    rdata := rf.read(addr)
+    // rdata := rf.read(~addr(log2Up(n)-1, 0))
       // Mux(Bool(zero) && addr === UInt(0), UInt(0), rf.read(addr))
-    when (addr === UInt(0)) {
+    when (Bool(zero) && addr === UInt(0)) {
       rdata := UInt(0)
     }
     rdata
@@ -901,9 +909,10 @@ class SeqRegFile(n: Int, w: Int, zero: Boolean = false) {
   def write(addr: UInt, data: UInt) = {
     canRead = false
     when (addr =/= UInt(0)) {
-      rf.write(~addr(log2Up(n)-1, 0), data)
+      rf.write(addr, data)
+      // rf.write(~addr(log2Up(n)-1, 0), data)
       for ((raddr, rdata) <- reads)
-        when (addr === raddr) { rdata := data }
+        when (addr === RegNext(raddr)) { rdata := data }
     }
   }
 }
